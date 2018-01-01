@@ -1,57 +1,104 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 // Package ed25519 implements the Ed25519 signature algorithm. See
-// http://ed25519.cr.yp.to/.
+// https://ed25519.cr.yp.to/.
+//
+// These functions are also compatible with the “Ed25519” function defined in
+// RFC 8032.
 package ed25519
 
-// This code is a port of the public domain, "ref10" implementation of ed25519
+// This code is a port of the public domain, “ref10” implementation of ed25519
 // from SUPERCOP.
 
 import (
-	"crypto/subtle"
+	"bytes"
+	"crypto"
+	cryptorand "crypto/rand"
+	"crypto/sha512"
+	"errors"
 	"hash"
 	"io"
+	"strconv"
 
-	"github.com/agl/ed25519/edwards25519"
+	"github.com/lukealonso/ed25519/edwards25519"
 )
 
 const (
-	PublicKeySize  = 32
+	// PublicKeySize is the size, in bytes, of public keys as used in this package.
+	PublicKeySize = 32
+	// PrivateKeySize is the size, in bytes, of private keys as used in this package.
 	PrivateKeySize = 64
-	SignatureSize  = 64
+	// SignatureSize is the size, in bytes, of signatures generated and verified by this package.
+	SignatureSize = 64
 )
 
-// GenerateKey generates a public/private key pair using randomness from rand.
-func GenerateKey(rand io.Reader, h hash.Hash) (publicKey *[PublicKeySize]byte, privateKey *[PrivateKeySize]byte, err error) {
-	privateKey = new([64]byte)
-	publicKey = new([32]byte)
+// PublicKey is the type of Ed25519 public keys.
+type PublicKey []byte
+
+// PrivateKey is the type of Ed25519 private keys. It implements crypto.Signer.
+type PrivateKey []byte
+
+// Public returns the PublicKey corresponding to priv.
+func (priv PrivateKey) Public() crypto.PublicKey {
+	publicKey := make([]byte, PublicKeySize)
+	copy(publicKey, priv[32:])
+	return PublicKey(publicKey)
+}
+
+// Sign signs the given message with priv.
+// Ed25519 performs two passes over messages to be signed and therefore cannot
+// handle pre-hashed messages. Thus opts.HashFunc() must return zero to
+// indicate the message hasn't been hashed. This can be achieved by passing
+// crypto.Hash(0) as the value for opts.
+func (priv PrivateKey) Sign(rand io.Reader, message []byte, opts crypto.SignerOpts, h hash.Hash) (signature []byte, err error) {
+	if opts.HashFunc() != crypto.Hash(0) {
+		return nil, errors.New("ed25519: cannot sign hashed message")
+	}
+
+	return Sign(priv, message, h), nil
+}
+
+// GenerateKey generates a public/private key pair using entropy from rand.
+// If rand is nil, crypto/rand.Reader will be used.
+func GenerateKey(rand io.Reader, h hash.Hash) (publicKey PublicKey, privateKey PrivateKey, err error) {
+	if rand == nil {
+		rand = cryptorand.Reader
+	}
+
+	privateKey = make([]byte, PrivateKeySize)
+	publicKey = make([]byte, PublicKeySize)
 	_, err = io.ReadFull(rand, privateKey[:32])
 	if err != nil {
 		return nil, nil, err
 	}
 
-	h.Reset()
-	h.Write(privateKey[:32])
-	digest := h.Sum(nil)
-
+	digest := sha512.Sum512(privateKey[:32])
 	digest[0] &= 248
 	digest[31] &= 127
 	digest[31] |= 64
 
 	var A edwards25519.ExtendedGroupElement
 	var hBytes [32]byte
-	copy(hBytes[:], digest)
+	copy(hBytes[:], digest[:])
 	edwards25519.GeScalarMultBase(&A, &hBytes)
-	A.ToBytes(publicKey)
+	var publicKeyBytes [32]byte
+	A.ToBytes(&publicKeyBytes)
 
-	copy(privateKey[32:], publicKey[:])
-	return
+	copy(privateKey[32:], publicKeyBytes[:])
+	copy(publicKey, publicKeyBytes[:])
+
+	return publicKey, privateKey, nil
 }
 
-// Sign signs the message with privateKey and returns a signature.
-func Sign(privateKey *[PrivateKeySize]byte, message []byte, h hash.Hash) *[SignatureSize]byte {
+// Sign signs the message with privateKey and returns a signature. It will
+// panic if len(privateKey) is not PrivateKeySize.
+func Sign(privateKey PrivateKey, message []byte, h hash.Hash) []byte {
+	if l := len(privateKey); l != PrivateKeySize {
+		panic("ed25519: bad private key length: " + strconv.Itoa(l))
+	}
+
 	h.Reset()
 	h.Write(privateKey[:32])
 
@@ -87,20 +134,28 @@ func Sign(privateKey *[PrivateKeySize]byte, message []byte, h hash.Hash) *[Signa
 	var s [32]byte
 	edwards25519.ScMulAdd(&s, &hramDigestReduced, &expandedSecretKey, &messageDigestReduced)
 
-	signature := new([64]byte)
+	signature := make([]byte, SignatureSize)
 	copy(signature[:], encodedR[:])
 	copy(signature[32:], s[:])
+
 	return signature
 }
 
-// Verify returns true iff sig is a valid signature of message by publicKey.
-func Verify(publicKey *[PublicKeySize]byte, message []byte, sig *[SignatureSize]byte, h hash.Hash) bool {
-	if sig[63]&224 != 0 {
+// Verify reports whether sig is a valid signature of message by publicKey. It
+// will panic if len(publicKey) is not PublicKeySize.
+func Verify(publicKey PublicKey, message, sig []byte, h hash.Hash) bool {
+	if l := len(publicKey); l != PublicKeySize {
+		panic("ed25519: bad public key length: " + strconv.Itoa(l))
+	}
+
+	if len(sig) != SignatureSize || sig[63]&224 != 0 {
 		return false
 	}
 
 	var A edwards25519.ExtendedGroupElement
-	if !A.FromBytes(publicKey) {
+	var publicKeyBytes [32]byte
+	copy(publicKeyBytes[:], publicKey)
+	if !A.FromBytes(&publicKeyBytes) {
 		return false
 	}
 	edwards25519.FeNeg(&A.X, &A.X)
@@ -123,5 +178,5 @@ func Verify(publicKey *[PublicKeySize]byte, message []byte, sig *[SignatureSize]
 
 	var checkR [32]byte
 	R.ToBytes(&checkR)
-	return subtle.ConstantTimeCompare(sig[:32], checkR[:]) == 1
+	return bytes.Equal(sig[:32], checkR[:])
 }

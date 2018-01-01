@@ -8,15 +8,12 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
 	"io"
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/agl/ed25519/edwards25519"
 )
 
 type zeroReader struct{}
@@ -26,22 +23,6 @@ func (zeroReader) Read(buf []byte) (int, error) {
 		buf[i] = 0
 	}
 	return len(buf), nil
-}
-
-func TestUnmarshalMarshal(t *testing.T) {
-	pub, _, _ := GenerateKey(rand.Reader, sha512.New())
-
-	var A edwards25519.ExtendedGroupElement
-	if !A.FromBytes(pub) {
-		t.Fatalf("ExtendedGroupElement.FromBytes failed")
-	}
-
-	var pub2 [32]byte
-	A.ToBytes(&pub2)
-
-	if *pub != pub2 {
-		t.Errorf("FromBytes(%v)->ToBytes does not round-trip, got %x\n", *pub, pub2)
-	}
 }
 
 func TestSignVerify(t *testing.T) {
@@ -111,14 +92,14 @@ func TestGolden(t *testing.T) {
 		copy(priv[:], privBytes)
 		copy(priv[32:], pubKeyBytes)
 
-		sig2 := Sign(&priv, msg, sha512.New())
+		sig2 := Sign(PrivateKey(priv[:]), msg, sha512.New())
 		if !bytes.Equal(sig, sig2[:]) {
 			t.Errorf("different signature result on line %d: %x vs %x", lineNo, sig, sig2)
 		}
 
 		var pubKey [PublicKeySize]byte
 		copy(pubKey[:], pubKeyBytes)
-		if !Verify(&pubKey, msg, sig2, sha512.New()) {
+		if !Verify(PublicKey(pubKey[:]), msg, sig2, sha512.New()) {
 			t.Errorf("signature failed to verify on line %d", lineNo)
 		}
 	}
