@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"crypto"
 	cryptorand "crypto/rand"
-	"crypto/sha512"
 	"errors"
 	"hash"
 	"io"
@@ -74,7 +73,10 @@ func GenerateKey(rand io.Reader, h hash.Hash) (publicKey PublicKey, privateKey P
 		return nil, nil, err
 	}
 
-	digest := sha512.Sum512(privateKey[:32])
+	var digest [64]byte
+	h.Reset()
+	h.Write(privateKey[:32])
+	h.Sum(digest[:0])
 	digest[0] &= 248
 	digest[31] &= 127
 	digest[31] |= 64
